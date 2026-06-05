@@ -11,3 +11,9 @@ wheels/
 
 # Environment variables
 .env
+
+# CSV files
+*.csv
+
+# JSON files
+*.json

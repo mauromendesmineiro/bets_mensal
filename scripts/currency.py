@@ -1,0 +1,144 @@
+import requests
+import datetime
+import json
+import csv
+import os
+import ast
+from pathlib import Path
+import logging
+from dotenv import load_dotenv
+
+# Carrega variáveis de ambiente do arquivo .env na raiz do projeto
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+
+# type hint indica o que a função deve retornar (recebe a url como uma str e retorna uma lista)
+def extract_currency(
+    url: str,
+) -> list:
+    response = requests.get(
+        url
+    )  # requisição HTTP do tipe GET para a URL da API, armazenando a resposta em 'response'
+    data = response.json()  # converte a resposta para um dicionário Python
+
+    # se o status da resposta for diferente de 200, exibe um erro e retorna uma lista vazia
+    if response.status_code != 200:
+        logging.error(f"Error fetching data from: {response.status_code}")
+        return []
+
+    # se não houver dados na resposta, exibe um erro e retorna uma lista vazia
+    if not data:
+        logging.error("No data received from the API")
+        return []
+
+    # caminho onde será salvo o arquivo
+    output_path = "data/currency.json"
+    # caminho do diretório onde será salvo o arquivo
+    output_dir = Path(output_path).parent
+    # cria o diretório se ele não existir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # abre o arquivo em modo de escrita
+    with open(output_path, "w", encoding="utf-8") as f:
+        # escreve os dados no arquivo
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+    logging.info(f"Data saved to {output_path}")
+    return data
+
+
+def save_currency(
+    json_path: str = "data/currency.json",
+    target_currencies: list[str] | None = None,
+    csv_path: str = "data/currency_rates.csv",
+) -> None:
+    """Append selected currency rates to a CSV.
+    The CSV will contain: time_last_update_utc, base_code, currency_code, rate.
+    If the file does not exist it is created with a header row.
+    """
+    # carrega os dados do JSON
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        logging.error(f"JSON file not found: {json_path}")
+        return
+
+    # Se não houver lista de moedas, tenta ler do .env
+    if target_currencies is None:
+        env_val = os.getenv("TARGET_CURRENCIES")
+        if env_val:
+            try:
+                target_currencies = ast.literal_eval(env_val)
+            except Exception as e:
+                logging.error(f"Failed to parse TARGET_CURRENCIES from .env: {e}")
+                target_currencies = []
+        else:
+            target_currencies = []
+
+    raw_timestamp = data.get("time_last_update_utc")
+    base = data.get("base_code")
+    rates = data.get("conversion_rates", {})
+
+    # Converte data para formato yyyy-MM-dd
+    try:
+        timestamp = datetime.datetime.strptime(raw_timestamp, "%a, %d %b %Y %H:%M:%S %z").strftime("%Y-%m-%d")
+    except Exception as e:
+        logging.error(f"Failed to parse timestamp '{raw_timestamp}': {e}")
+        timestamp = raw_timestamp
+
+    # Se ainda não houver moedas (lista vazia), grava todas as disponíveis
+    if not target_currencies:
+        target_currencies = list(rates.keys())
+
+    rows = []
+    for cur in target_currencies:
+        rate = rates.get(cur)
+        if rate is None:
+            logging.warning(f"Currency {cur} not found in conversion_rates")
+            continue
+        rows.append([timestamp, base, cur, rate])
+
+    # Remove entradas duplicadas (mesmo dia e mesma moeda)
+    # Primeiro, carrega pares existentes do CSV se ele já existir
+    existing_pairs = set()
+    if Path(csv_path).exists():
+        with open(csv_path, "r", newline="", encoding="utf-8") as csvfile_r:
+            reader = csv.reader(csvfile_r)
+            # pula cabeçalho
+            next(reader, None)
+            for row in reader:
+                if len(row) >= 4:
+                    existing_pairs.add((row[0], row[2]))  # (date, currency)
+
+    # Filtra linhas que ainda não estão no CSV
+    filtered_rows = [row for row in rows if (row[0], row[2]) not in existing_pairs]
+
+    if not filtered_rows:
+        logging.info("All rows already present in CSV; nothing to append")
+        return
+
+    rows = filtered_rows
+    file_exists = Path(csv_path).exists()
+    with open(csv_path, "a", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        if not file_exists:
+            writer.writerow(["time_last_update_utc", "base_code", "currency", "rate"])
+        writer.writerows(rows)
+    logging.info(f"Appended {len(rows)} rows to {csv_path}")
+
+
+if __name__ == "__main__":
+    # Exemplo de fluxo completo
+    # 1️⃣ Baixa/atualiza o JSON (substitua a URL pela sua API)
+    # extract_currency("https://example.com/api")  # opcional se já existir o JSON
+
+    # 2️⃣ Salva todas as moedas ou uma lista personalizada
+    # Para salvar apenas algumas moedas, passe a lista abaixo
+    # moedas = ["USD", "GBP", "BRL"]
+    # save_currency(target_currencies=moedas)
+    save_currency(target_currencies=None)  # grava todas as moedas disponíveis
