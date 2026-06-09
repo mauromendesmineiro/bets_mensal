@@ -11,9 +11,18 @@ wheels/
 
 # Environment variables
 .env
+.env.passwords
+!.env.example
+
+# Logs
+logs/
+*.log
 
 # CSV files
 *.csv
+
+# Excel files
+*.xlsx
 
 # JSON files
 *.json
