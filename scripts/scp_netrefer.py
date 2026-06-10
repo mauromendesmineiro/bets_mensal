@@ -9,7 +9,7 @@ Fluxo por operador (linha activa do config/logins.xlsx):
 3. Navega para o relatório  /affiliates/Earnings/MonthlyEarnings
 4. Extrai a tabela de ganhos (download CSV ou leitura do HTML)
 5. Padroniza num DataFrame e guarda um CSV por operador em data/
-6. Concatena tudo num único ficheiro data/netrefer.csv
+6. Concatena tudo num único ficheiro report/netrefer.csv
 
 Credenciais:
 - URLs, usernames, operadores e flags vêm de  config/logins.xlsx
@@ -37,16 +37,33 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pandas as pd
-from dotenv import load_dotenv
 from playwright.sync_api import BrowserContext, Page, sync_playwright
-
-load_dotenv()
 
 # ── Caminhos do projecto ────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_XLSX = ROOT / "config" / "logins.xlsx"
 DATA_DIR = ROOT / "data"
+REPORT_DIR = ROOT / "report"
 LOGS_DIR = ROOT / "logs"
+
+
+def _load_env() -> None:
+    """Carrega .env suportando chaves entre aspas ("KEY"="VALUE")."""
+    env_file = ROOT / ".env"
+    if not env_file.exists():
+        return
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip().strip('"')
+        v = v.strip().strip('"')
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+
+_load_env()
 
 # ── Constantes da plataforma ────────────────────────────────────────────────
 PLATFORM_SLUG = "NETREFER"
@@ -143,8 +160,10 @@ def load_accounts(operador_filter: str | None = None) -> list[Account]:
         return []
 
     df = pd.read_excel(CONFIG_XLSX, dtype=str)
-    if "Active" in df.columns:
-        df = df[df["Active"].astype(str).str.strip() == "1"].reset_index(drop=True)
+    df = df[
+        (df["Plataforma"].str.strip().str.lower() == "netrefer")
+        & (df["Active"].astype(str).str.strip() == "1")
+    ].reset_index(drop=True)
 
     accounts: list[Account] = []
     for _, row in df.iterrows():
@@ -366,11 +385,17 @@ def standardize(df: pd.DataFrame, acc: Account) -> pd.DataFrame:
     value_cols = [c for c in df.columns if c.strip().lower() != "month"]
     currency = df.apply(lambda r: detect_row_currency(r, value_cols), axis=1)
 
+    from datetime import date as _date
+    _today = _date.today().replace(day=1)
+    _prev = (_today - __import__("datetime").timedelta(days=1)).replace(day=1)
+    month_label = _prev.strftime("%Y-%m")
+
     meta = {
         "operador": acc.operador,
         "empresa": acc.empresa,
         "plataforma": acc.plataforma,
         "username": acc.username,
+        "month": month_label,
         "currency": currency,
         "extracted_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -403,22 +428,47 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", name).strip("_") or "report"
 
 
+def _upsert_csv(path: Path, new_df: pd.DataFrame, key_cols: list[str]) -> pd.DataFrame:
+    """Substitui no CSV existente as linhas cujas key_cols coincidem com new_df; appenda o resto."""
+    if path.exists():
+        try:
+            existing = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
+            missing = [c for c in key_cols if c not in existing.columns]
+            if missing:
+                log.warning(f"Upsert: colunas chave ausentes no ficheiro existente: {missing} — a sobrescrever")
+                return new_df.copy()
+            mask = existing[key_cols].apply(tuple, axis=1).isin(
+                new_df[key_cols].apply(tuple, axis=1)
+            )
+            removed = mask.sum()
+            existing = existing[~mask]
+            if removed:
+                log.debug(f"Upsert: {removed} linha(s) substituída(s) em {path.name}")
+            return pd.concat([existing, new_df], ignore_index=True)
+        except Exception as e:
+            log.warning(f"Upsert falhou ({e}) — a sobrescrever {path.name}")
+    return new_df.copy()
+
+
 def save_operator_csv(df: pd.DataFrame, acc: Account) -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     path = DATA_DIR / f"{_safe_name(acc.file_name)}.csv"
-    df.to_csv(path, index=False, encoding="utf-8-sig")
+    merged = _upsert_csv(path, df, ["month"])
+    merged.to_csv(path, index=False, encoding="utf-8-sig")
     log.info(f"Guardado {len(df)} linhas → {path.name}")
     return path
 
 
 def save_combined(frames: list[pd.DataFrame]) -> Path | None:
     if not frames:
-        log.warning("Nenhum dado para consolidar — data/netrefer.csv não gerado")
+        log.warning("Nenhum dado para consolidar — report/netrefer.csv não gerado")
         return None
-    combined = pd.concat(frames, ignore_index=True)
-    path = DATA_DIR / "netrefer.csv"
-    combined.to_csv(path, index=False, encoding="utf-8-sig")
-    log.info(f"Ficheiro consolidado: {path}  ({len(combined)} linhas)")
+    new_data = pd.concat(frames, ignore_index=True)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    path = REPORT_DIR / "netrefer.csv"
+    merged = _upsert_csv(path, new_data, ["operador", "username", "month"])
+    merged.to_csv(path, index=False, encoding="utf-8-sig")
+    log.info(f"Ficheiro consolidado: {path}  ({len(merged)} linhas)")
     return path
 
 
