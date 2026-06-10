@@ -16,7 +16,6 @@ wheels/
 
 # Logs
 logs/
-*.log
 
 # CSV files
 *.csv
@@ -26,3 +25,9 @@ logs/
 
 # JSON files
 *.json
+
+# Jupyter Notebook files
+*.ipynb
+
+# Report files
+report/

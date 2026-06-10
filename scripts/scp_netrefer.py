@@ -9,7 +9,7 @@ Fluxo por operador (linha activa do config/logins.xlsx):
 3. Navega para o relatório  /affiliates/Earnings/MonthlyEarnings
 4. Extrai a tabela de ganhos (download CSV ou leitura do HTML)
 5. Padroniza num DataFrame e guarda um CSV por operador em data/
-6. Concatena tudo num único ficheiro data/netrefer.csv
+6. Concatena tudo num único ficheiro report/netrefer.csv
 
 Credenciais:
 - URLs, usernames, operadores e flags vêm de  config/logins.xlsx
@@ -43,6 +43,7 @@ from playwright.sync_api import BrowserContext, Page, sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_XLSX = ROOT / "config" / "logins.xlsx"
 DATA_DIR = ROOT / "data"
+REPORT_DIR = ROOT / "report"
 LOGS_DIR = ROOT / "logs"
 
 
@@ -460,10 +461,11 @@ def save_operator_csv(df: pd.DataFrame, acc: Account) -> Path:
 
 def save_combined(frames: list[pd.DataFrame]) -> Path | None:
     if not frames:
-        log.warning("Nenhum dado para consolidar — data/report_netrefer.csv não gerado")
+        log.warning("Nenhum dado para consolidar — report/netrefer.csv não gerado")
         return None
     new_data = pd.concat(frames, ignore_index=True)
-    path = DATA_DIR / "report_netrefer.csv"
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    path = REPORT_DIR / "netrefer.csv"
     merged = _upsert_csv(path, new_data, ["operador", "username", "month"])
     merged.to_csv(path, index=False, encoding="utf-8-sig")
     log.info(f"Ficheiro consolidado: {path}  ({len(merged)} linhas)")

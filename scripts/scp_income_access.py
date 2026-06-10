@@ -8,7 +8,7 @@ Fluxo por operador (linha activa do config/logins.xlsx, Plataforma=IncomeAccess)
 2. Navega para o relatório de comissões (Commission Report)
 3. Configura Merchant = "All Merchants" e extrai o CSV
 4. Padroniza num DataFrame e guarda um CSV por operador em data/
-5. Concatena tudo num único ficheiro data/income_access.csv
+5. Concatena tudo num único ficheiro report/income_access.csv
 
 Flags Active no logins.xlsx:
   1 → activa, sem captcha
@@ -52,6 +52,7 @@ from playwright.sync_api import BrowserContext, Page, sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_XLSX = ROOT / "config" / "logins.xlsx"
 DATA_DIR = ROOT / "data"
+REPORT_DIR = ROOT / "report"
 LOGS_DIR = ROOT / "logs"
 
 
@@ -595,29 +596,122 @@ def _scrape_html_table(page: Page) -> pd.DataFrame | None:
 
 # ── Padronização ──────────────────────────────────────────────────────────────
 
-# Mapeamento das colunas do report Income Access para nomes canónicos
+# Mapeamento das colunas do report Income Access para nomes canónicos.
+#
+# Apesar de forçarmos lang=en na URL de login, o Income Access guarda a
+# preferência de idioma por conta no servidor, pelo que alguns relatórios
+# chegam em Português ou Espanhol. Para garantir que os campos ficam sempre
+# padronizados independentemente do idioma do report, mapeamos aqui os
+# cabeçalhos EN/PT/ES (e variantes por merchant) para o mesmo nome canónico.
+# As chaves estão em minúsculas — o lookup é feito com c.lower().
 IA_COLUMN_MAP = {
+    # ── rowid ────────────────────────────────────────────────────────────────
     "rowid": "rowid",
+    # ── currency ─────────────────────────────────────────────────────────────
     "currency symbol": "currency",
+    "currencysymbol": "currency",
+    "símbolo da moeda": "currency",  # PT
+    # ── total records ────────────────────────────────────────────────────────
     "total records": "total_records",
+    "totalrecords": "total_records",
+    # ── affiliate id ─────────────────────────────────────────────────────────
     "affiliate id": "affiliate_id",
+    "id do afiliado": "affiliate_id",          # PT
+    "identidad del afiliado": "affiliate_id",  # ES
+    # ── affiliate username ───────────────────────────────────────────────────
     "username": "affiliate_username",
+    "nome de usuário": "affiliate_username",   # PT
+    "nombre de usuario": "affiliate_username",  # ES
+    # ── country ──────────────────────────────────────────────────────────────
     "country": "country",
+    "país": "country",  # PT
+    # ── impressions ──────────────────────────────────────────────────────────
     "impressions": "impressions",
+    "impressões": "impressions",  # PT
+    "impresiones": "impressions",  # ES
+    # ── clicks ───────────────────────────────────────────────────────────────
     "clicks": "clicks",
+    "cliques": "clicks",  # PT
+    # ── click-through ratio ──────────────────────────────────────────────────
     "click-through ratio": "click_through_ratio",
+    "porcentagem de cliques": "click_through_ratio",        # PT
+    "porcentaje de 'click-through'": "click_through_ratio",  # ES
+    # ── registrations ────────────────────────────────────────────────────────
     "registrations": "registrations",
+    "registros": "registrations",  # PT
+    "descargas": "registrations",   # ES (Descargas/downloads ocupa este slot)
+    # ── registration ratio ───────────────────────────────────────────────────
     "registration ratio": "registration_ratio",
+    "porcentagem de registros": "registration_ratio",  # PT
+    "porcentaje de 'descargas'": "registration_ratio",  # ES
+    # ── deposits ─────────────────────────────────────────────────────────────
     "deposits": "deposits",
+    "depósitos": "deposits",  # PT
+    "depositos": "deposits",   # ES
+    # ── net revenue ──────────────────────────────────────────────────────────
     "net revenue": "net_revenue",
+    "netrev": "net_revenue",
+    "receita liquida": "net_revenue",  # PT
+    "ingresos de red": "net_revenue",   # ES
+    # ── gross revenue ────────────────────────────────────────────────────────
+    "gross revenue": "gross_revenue",
+    "rendimento bruto": "gross_revenue",  # PT
+    "ingresos brutos": "gross_revenue",    # ES
+    # ── total bets/hands ─────────────────────────────────────────────────────
     "total bets/hands": "total_bets_hands",
+    "total de apuestas / manos": "total_bets_hands",  # ES
+    # ── stake ────────────────────────────────────────────────────────────────
     "stake": "stake",
+    "apuestas": "stake",  # ES
+    # ── net points ───────────────────────────────────────────────────────────
     "net points": "net_points",
+    # ── % commission ─────────────────────────────────────────────────────────
     "% commission": "pct_commission",
+    "%commission": "pct_commission",
+    "% de comissão": "pct_commission",       # PT
+    "porcentaje de comisión": "pct_commission",  # ES
+    # ── cpa commission ───────────────────────────────────────────────────────
     "cpa commission": "cpa_commission",
+    "comissão cpa": "cpa_commission",                  # PT
+    "comisión coste de adquisición": "cpa_commission",  # ES
+    # ── cpa count ────────────────────────────────────────────────────────────
     "cpa count": "cpa_count",
+    "conta cpa": "cpa_count",  # PT
+    # ── referral commission ──────────────────────────────────────────────────
     "referral commission": "referral_commission",
+    "comissão de referentes": "referral_commission",  # PT
+    "comisión de referido": "referral_commission",     # ES
+    # ── total commission ─────────────────────────────────────────────────────
     "total commission": "total_commission",
+    "comissão total": "total_commission",  # PT
+    "comisión total": "total_commission",   # ES
+    # ── bonus ────────────────────────────────────────────────────────────────
+    "bonus": "bonus",
+    "bônus": "bonus",  # PT
+    # ── chargebacks ──────────────────────────────────────────────────────────
+    "chargebacks": "chargebacks",
+    "estorno": "chargebacks",                                # PT
+    "chargebacks 'reembolsos fraudulentos'": "chargebacks",  # ES
+    # ── outras variantes EN por merchant ─────────────────────────────────────
+    "installs": "installs",
+    "memberid": "member_id",
+    "wagers": "wagers",
+    "commadminfee": "comm_admin_fee",
+    "adjustments": "adjustments",
+    "costs": "costs",
+    "new account ratio": "new_account_ratio",
+    "new depositing acc count": "new_depositing_acc_count",
+    "new active acc count": "new_active_acc_count",
+    "first deposit count": "first_deposit_count",
+    "active accounts": "active_accounts",
+    "active days": "active_days",
+    "new acc purchases": "new_acc_purchases",
+    "depositing accounts": "depositing_accounts",
+    "wagering accounts": "wagering_accounts",
+    "average active days": "average_active_days",
+    "gross / player": "gross_per_player",
+    "net / player": "net_per_player",
+    # ── merchant (tratado em standardize) ────────────────────────────────────
     "merchant": "merchant",
 }
 
@@ -643,6 +737,11 @@ def standardize(df: pd.DataFrame, acc: Account) -> pd.DataFrame:
         columns={c: IA_COLUMN_MAP.get(c.lower(), c) for c in df.columns},
         inplace=True,
     )
+
+    # Funde colunas que colidiram no mesmo nome canónico (ex: report que traz
+    # tanto "Net Revenue" como a variante "NetRev"): mantém o 1.º valor não-vazio.
+    if df.columns.duplicated().any():
+        df = df.T.groupby(level=0, sort=False).first().T
 
     from datetime import date
     _today = date.today().replace(day=1)
@@ -714,7 +813,8 @@ def save_combined(frames: list[pd.DataFrame]) -> Path | None:
         log.warning("Nenhum dado para consolidar — data/income_access.csv não gerado")
         return None
     new_data = pd.concat(frames, ignore_index=True)
-    path = DATA_DIR / "income_access.csv"
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    path = REPORT_DIR / "income_access.csv"
     merged = _upsert_csv(path, new_data, ["operador", "account_username", "month"])
     merged.to_csv(path, index=False, encoding="utf-8-sig")
     log.info(f"Ficheiro consolidado: {path}  ({len(merged)} linhas)")
