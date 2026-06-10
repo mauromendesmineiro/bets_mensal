@@ -25,7 +25,11 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_XLSX = ROOT / "config" / "logins.xlsx"
-PLATFORM_SLUG = "NETREFER"
+
+PLATFORM_SLUG_MAP = {
+    "netrefer": "NETREFER",
+    "incomeaccess": "INCOME_ACCESS",
+}
 
 
 def sanitize(val: str) -> str:
@@ -50,13 +54,15 @@ def main() -> None:
         operador = str(row.get("Operador", "")).strip()
         username = str(row.get("Username", "")).strip()
         password = str(row.get("Password", "")).strip()
+        plataforma = str(row.get("Plataforma", "")).strip().lower()
         if not username or password.lower() == "nan":
             continue
-        key = f"PASS_{PLATFORM_SLUG}_{sanitize(operador)}_{sanitize(username)}"
+        slug = PLATFORM_SLUG_MAP.get(plataforma, sanitize(plataforma))
+        key = f"PASS_{slug}_{sanitize(operador)}_{sanitize(username)}"
         if key in seen:
             continue
         seen.add(key)
-        lines.append(f"{key}={password}")
+        lines.append(f'{key}="{password}"')
 
     Path(args.output).write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"[OK] {len(seen)} passwords escritas em {args.output}")
