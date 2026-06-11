@@ -113,8 +113,9 @@ def get_logger(name: str = "scp_cellxpert") -> logging.Logger:
     logger.addHandler(sh)
     try:
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        plat = name.replace("scp_", "")
         fh = logging.FileHandler(
-            LOGS_DIR / f"{datetime.now():%Y-%m-%d}.log", encoding="utf-8"
+            LOGS_DIR / f"{datetime.now():%Y-%m-%d}_{plat}.log", encoding="utf-8"
         )
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(fmt)
