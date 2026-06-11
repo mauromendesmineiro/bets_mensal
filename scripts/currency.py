@@ -86,10 +86,21 @@ def save_currency(
 
     # Converte data para formato yyyy-MM-dd
     try:
-        timestamp = datetime.datetime.strptime(raw_timestamp, "%a, %d %b %Y %H:%M:%S %z").strftime("%Y-%m-%d")
+        dt = datetime.datetime.strptime(raw_timestamp, "%a, %d %b %Y %H:%M:%S %z")
+        timestamp = dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception as e:
         logging.error(f"Failed to parse timestamp '{raw_timestamp}': {e}")
         timestamp = raw_timestamp
+        dt = None
+
+    # Mês de referência = mês anterior à data da cotação (período do relatório).
+    # A cotação é puxada no início do mês seguinte ao período extraído pelos scrapers.
+    if dt is not None:
+        first_of_month = dt.replace(day=1)
+        prev = (first_of_month - datetime.timedelta(days=1)).replace(day=1)
+        month = prev.strftime("%Y-%m")
+    else:
+        month = ""
 
     # Se ainda não houver moedas (lista vazia), grava todas as disponíveis
     if not target_currencies:
@@ -101,10 +112,10 @@ def save_currency(
         if rate is None:
             logging.warning(f"Currency {cur} not found in conversion_rates")
             continue
-        rows.append([timestamp, base, cur, rate])
+        rows.append([month, timestamp, base, cur, rate])
 
-    # Remove entradas duplicadas (mesmo dia e mesma moeda)
-    # Primeiro, carrega pares existentes do CSV se ele já existir
+    # Acumula cotações: dedup por (time_last_update_utc, currency). Assim várias
+    # cotações do mesmo mês coexistem e o build_union escolhe a mais antiga do mês.
     existing_pairs = set()
     if Path(csv_path).exists():
         with open(csv_path, "r", newline="", encoding="utf-8") as csvfile_r:
@@ -112,11 +123,11 @@ def save_currency(
             # pula cabeçalho
             next(reader, None)
             for row in reader:
-                if len(row) >= 4:
-                    existing_pairs.add((row[0], row[2]))  # (date, currency)
+                if len(row) >= 5:
+                    existing_pairs.add((row[1], row[3]))  # (time_last_update_utc, currency)
 
     # Filtra linhas que ainda não estão no CSV
-    filtered_rows = [row for row in rows if (row[0], row[2]) not in existing_pairs]
+    filtered_rows = [row for row in rows if (row[1], row[3]) not in existing_pairs]
 
     if not filtered_rows:
         logging.info("All rows already present in CSV; nothing to append")
@@ -127,18 +138,19 @@ def save_currency(
     with open(csv_path, "a", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
         if not file_exists:
-            writer.writerow(["time_last_update_utc", "base_code", "currency", "rate"])
+            writer.writerow(["month", "time_last_update_utc", "base_code", "currency", "rate"])
         writer.writerows(rows)
     logging.info(f"Appended {len(rows)} rows to {csv_path}")
 
 
 if __name__ == "__main__":
-    # Exemplo de fluxo completo
-    # 1️⃣ Baixa/atualiza o JSON (substitua a URL pela sua API)
-    # extract_currency("https://example.com/api")  # opcional se já existir o JSON
+    # 1) Baixa/atualiza o JSON a partir da API (se URL_CURRENCY_API estiver no .env).
+    #    Sem URL, usa o data/currency.json já existente.
+    url = os.getenv("URL_CURRENCY_API")
+    if url and "<chave>" not in url:
+        extract_currency(url)
+    else:
+        logging.info("URL_CURRENCY_API não configurada — a usar o currency.json existente")
 
-    # 2️⃣ Salva todas as moedas ou uma lista personalizada
-    # Para salvar apenas algumas moedas, passe a lista abaixo
-    # moedas = ["USD", "GBP", "BRL"]
-    # save_currency(target_currencies=moedas)
-    save_currency(target_currencies=None)  # grava todas as moedas disponíveis
+    # 2) Grava as moedas-alvo (TARGET_CURRENCIES no .env) ou todas as disponíveis.
+    save_currency(target_currencies=None)
