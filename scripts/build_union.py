@@ -417,12 +417,12 @@ def main() -> None:
     resta = union["resta"].astype(str).str.strip()
     union["resta"] = resta.where(~resta.isin(["", "nan", "NaN", "None"]) & union["resta"].notna(), "No")
 
-    # Coluna 'index' = concatenação de month, ref, plataforma e username.
+    # Coluna 'index' = concatenação de month, ref, plataforma e username (sem separadores).
     union["index"] = (
         union["month"].astype(str).str.strip()
-        + "_" + union["ref"].astype(str).str.strip()
-        + "_" + union["plataforma"].astype(str).str.strip()
-        + "_" + union["username"].astype(str).str.strip()
+        + union["ref"].astype(str).str.strip()
+        + union["plataforma"].astype(str).str.strip()
+        + union["username"].astype(str).str.strip()
     )
 
     union = union[OUTPUT_COLS]

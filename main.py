@@ -12,6 +12,8 @@ Pipeline (nesta ordem):
                       planilha existe no logins.xlsx (--validate-logins, grava
                       config/contas_faltantes.csv). Antes do build_union.
   4. build_union.py — consolida os report/*.csv em report/union_data.csv
+  5. gsheets.py     — escreve union_data.csv na aba DatosAutomatizados do Google
+                      Sheets (--append-union, com decimais em vírgula, append mode)
 
 Uso:
     python main.py                       # pipeline completo
@@ -21,6 +23,7 @@ Uso:
     python main.py --max-workers 4       # nº máximo de plataformas em simultâneo
     python main.py --no-currency         # salta a etapa de câmbio
     python main.py --no-union            # salta a consolidação final
+    python main.py --no-append           # salta a escrita no Google Sheets
 """
 
 from __future__ import annotations
@@ -134,6 +137,7 @@ def main() -> None:
     parser.add_argument("--no-currency", action="store_true", help="Salta a etapa de câmbio")
     parser.add_argument("--no-ref", action="store_true", help="Salta a atualização do ref via Google Sheets")
     parser.add_argument("--no-union", action="store_true", help="Salta a consolidação final")
+    parser.add_argument("--no-append", action="store_true", help="Salta a escrita no Google Sheets (DatosAutomatizados)")
     args = parser.parse_args()
 
     # Mês alvo: validado e exportado para os subprocessos via TARGET_MONTH.
@@ -202,6 +206,18 @@ def main() -> None:
         print("[union] saltado (--no-union)")
     else:
         resultados.append(run_step("union", UNION_SCRIPT, timeout=args.timeout))
+
+    # ── 5) Escrita no Google Sheets ─────────────────────────────────────────
+    print("-" * 60)
+    if args.no_union or args.no_append:
+        if args.no_union:
+            print("[gsheets] saltado (union não correu, --no-union)")
+        else:
+            print("[gsheets] saltado (--no-append)")
+    else:
+        resultados.append(
+            run_step("gsheets", GSHEETS_SCRIPT, ["--append-union"], timeout=args.timeout)
+        )
 
     total = time.monotonic() - inicio
     print("=" * 60)

@@ -315,16 +315,64 @@ def write_union_to_sheet(csv_path: Path = UNION_CSV) -> None:
     log.info(f"OK -> aba '{tab}' actualizada ({len(df)} linhas, {len(df.columns)} colunas)")
 
 
+def _convert_to_comma_decimal(value: str) -> str:
+    """Converte separadores de decimal de ponto para vírgula em valores numéricos.
+
+    Se o valor parece numérico (tem ponto e dígitos), substitui ponto por vírgula.
+    Ex.: '123.45' → '123,45'; 'texto' → 'texto' (inalterado).
+    """
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "none", ""):
+        return ""
+    # Se tem ponto e só tem dígitos/ponto/hífen/espaço, é provavelmente numérico
+    if "." in s and all(c.isdigit() or c in ".-+ " for c in s):
+        return s.replace(".", ",")
+    return s
+
+
+def append_union_to_sheet(csv_path: Path = UNION_CSV) -> None:
+    """Escreve union_data.csv na aba DatosAutomatizados (append: adiciona ao final).
+
+    Converte valores numéricos para vírgula como separador de decimal.
+    Se a aba não existe, cria; se existe, acrescenta após a última linha de dados.
+    """
+    if not csv_path.exists():
+        raise FileNotFoundError(f"{csv_path} não encontrado — corra o build_union primeiro")
+
+    df = pd.read_csv(csv_path, dtype=str, encoding="utf-8-sig").fillna("")
+    tab = "DatosAutomatizados"
+    sh = _open_spreadsheet()
+
+    try:
+        ws = sh.worksheet(tab)
+    except Exception:
+        ws = sh.add_worksheet(title=tab, rows=len(df) + 100, cols=len(df.columns) + 2)
+        # Primeira vez: adiciona cabeçalho
+        ws.append_row(df.columns.tolist(), value_input_option="USER_ENTERED")
+        log.debug(f"Aba '{tab}' criada com cabeçalho")
+
+    # Converte decimais em todos os valores
+    df_converted = df.map(lambda x: _convert_to_comma_decimal(x))
+
+    # Append em bloco: envia todas as linhas de uma vez (economiza quota do Sheets)
+    # USER_ENTERED permite que o Sheets interprete números, datas, etc. corretamente
+    rows_to_append = df_converted.values.tolist()
+    ws.append_rows(rows_to_append, value_input_option="USER_ENTERED")
+
+    log.info(f"OK -> aba '{tab}' actualizada (append: {len(df)} linhas adicionadas)")
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(description="Integração Google Sheets (ref / union)")
     parser.add_argument("--pull-ref", action="store_true", help="Planilha (4 abas) -> merge 'resta' no config/ref.xlsx")
-    parser.add_argument("--push-union", action="store_true", help="union_data.csv -> planilha")
+    parser.add_argument("--push-union", action="store_true", help="union_data.csv -> planilha (substitui tudo)")
+    parser.add_argument("--append-union", action="store_true", help="union_data.csv -> planilha aba DatosAutomatizados (append, com decimais em vírgula)")
     parser.add_argument("--validate-logins", action="store_true",
                         help="Planilha vs logins.xlsx -> config/contas_faltantes.csv")
     args = parser.parse_args()
 
-    if not (args.pull_ref or args.push_union or args.validate_logins):
+    if not (args.pull_ref or args.push_union or args.append_union or args.validate_logins):
         parser.print_help()
         sys.exit(0)
 
@@ -334,6 +382,8 @@ def main() -> None:
         validate_logins()
     if args.push_union:
         write_union_to_sheet()
+    if args.append_union:
+        append_union_to_sheet()
 
 
 if __name__ == "__main__":
