@@ -34,9 +34,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
-import logging
 import os
-import re
 import sys
 import time
 from dataclasses import dataclass
@@ -46,99 +44,35 @@ from urllib.parse import urlparse
 
 import pandas as pd
 from playwright.sync_api import BrowserContext, Page, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
+try:  # funciona tanto em execução directa quanto importado como scripts.*
+    import common
+except ImportError:
+    from scripts import common
+
+common.load_env()
 
 # ── Caminhos do projecto ────────────────────────────────────────────────────
-ROOT = Path(__file__).resolve().parents[1]
-CONFIG_XLSX = ROOT / "config" / "logins.xlsx"
-DATA_DIR = ROOT / "data"
-REPORT_DIR = ROOT / "report"
-LOGS_DIR = ROOT / "logs"
-
-
-def _load_env() -> None:
-    """Carrega .env suportando chaves entre aspas ("KEY"="VALUE")."""
-    env_file = ROOT / ".env"
-    if not env_file.exists():
-        return
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        k = k.strip().strip('"')
-        v = v.strip().strip('"')
-        if k and k not in os.environ:
-            os.environ[k] = v
-
-
-_load_env()
+ROOT = common.ROOT
+DATA_DIR = common.DATA_DIR
+REPORT_DIR = common.REPORT_DIR
 
 # ── Constantes da plataforma ────────────────────────────────────────────────
 PLATFORM_SLUG = "RAVENTRACK"
+CURRENCY_PREFIXES = common.CURRENCY_PREFIXES
 
-# Prefixos de moeda → código ISO. Ordem importa (mais específicos primeiro).
-CURRENCY_PREFIXES: list[tuple[str, str]] = [
-    ("R$", "BRL"),
-    ("€", "EUR"),
-    ("£", "GBP"),
-    ("COP", "COP"),
-    ("MXN", "MXN"),
-    ("PEN", "PEN"),
-    ("ARS", "ARS"),
-    ("CLP", "CLP"),
-    ("USD", "USD"),
-    ("$", "USD"),
-]
+DEFAULT_TIMEOUT = common.DEFAULT_TIMEOUT
+SLOW_MO = common.SLOW_MO
+HEADLESS = common.HEADLESS
 
-DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "20000"))
-SLOW_MO = int(os.getenv("SLOW_MO", "0"))
-HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
-
-
-# ── Logger ──────────────────────────────────────────────────────────────────
-def get_logger(name: str = "scp_raventrack") -> logging.Logger:
-    logger = logging.getLogger(name)
-    if logger.handlers:
-        return logger
-    logger.setLevel(logging.DEBUG)
-    fmt = logging.Formatter(
-        "%(asctime)s [%(levelname)-7s] %(message)s", datefmt="%H:%M:%S"
-    )
-    if hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setLevel(logging.INFO)
-    sh.setFormatter(fmt)
-    logger.addHandler(sh)
-    try:
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)
-        plat = name.replace("scp_", "")
-        fh = logging.FileHandler(
-            LOGS_DIR / f"{datetime.now():%Y-%m-%d}_{plat}.log", encoding="utf-8"
-        )
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-    except Exception:
-        pass
-    return logger
-
-
-log = get_logger()
+log = common.get_logger("scp_raventrack")
 
 
 # ── Config / contas ───────────────────────────────────────────────────────────
-def sanitize(val: str) -> str:
-    """Normaliza um valor para compor nomes de variáveis de ambiente."""
-    return re.sub(r"[^A-Z0-9]", "_", str(val).upper())
-
-
 def env_key_for(operador: str, username: str) -> str:
     """Convenção da password no .env: PASS_RAVENTRACK_<OPERADOR>_<USERNAME>."""
-    return f"PASS_{PLATFORM_SLUG}_{sanitize(operador)}_{sanitize(username)}"
+    return common.env_key_for(PLATFORM_SLUG, operador, username)
 
 
 @dataclass
@@ -149,6 +83,7 @@ class Account:
     username: str
     login_url: str
     file_name: str
+    id: str = ""
 
     @property
     def password(self) -> str:
@@ -156,22 +91,14 @@ class Account:
 
     @property
     def base_url(self) -> str:
-        p = urlparse(self.login_url)
-        return f"{p.scheme}://{p.netloc}"
+        return common.base_url_of(self.login_url)
 
 
-def load_accounts(operador_filter: str | None = None) -> list[Account]:
+def load_accounts(
+    operador_filter: str | None = None, ids: list[str] | None = None
+) -> list[Account]:
     """Lê os operadores RavenTrack activos do config/logins.xlsx."""
-    if not CONFIG_XLSX.exists():
-        log.error(f"Ficheiro de config não encontrado: {CONFIG_XLSX}")
-        return []
-
-    df = pd.read_excel(CONFIG_XLSX, dtype=str)
-    df = df[
-        (df["Plataforma"].str.strip().str.lower() == "raventrack")
-        & (df["Active"].astype(str).str.strip() == "1")
-    ].reset_index(drop=True)
-
+    df = common.load_login_rows("raventrack", operador_filter, ids)
     accounts: list[Account] = []
     for _, row in df.iterrows():
         url = str(row.get("URL", "")).strip()
@@ -179,10 +106,9 @@ def load_accounts(operador_filter: str | None = None) -> list[Account]:
         operador = str(row.get("Operador", "")).strip()
         if not url or not username or url.lower() == "nan":
             continue
-        if operador_filter and operador.lower() != operador_filter.lower():
-            continue
         accounts.append(
             Account(
+                id=str(row.get("Id", "")).strip(),
                 operador=operador,
                 empresa=str(row.get("Empresa", "")).strip(),
                 plataforma=str(row.get("Plataforma", "")).strip(),
@@ -216,16 +142,7 @@ _ERROR_SELECTORS = (
 
 
 def _first_visible(page: Page, selector: str):
-    """Devolve o primeiro elemento visível de um grupo de selectores, ou None."""
-    loc = page.locator(selector)
-    for i in range(loc.count()):
-        el = loc.nth(i)
-        try:
-            if el.is_visible():
-                return el
-        except Exception:
-            continue
-    return None
+    return common.first_visible(page, selector)
 
 
 def _login_error_text(page: Page) -> str:
@@ -253,7 +170,7 @@ def login(page: Page, acc: Account) -> bool:
 
     try:
         page.wait_for_selector(SEL_USERNAME, state="visible", timeout=DEFAULT_TIMEOUT)
-    except Exception:
+    except PlaywrightTimeout:
         log.error(f"Campo de username não apareceu em {acc.base_url}")
         return False
 
@@ -337,11 +254,7 @@ SEL_DATE_RANGE = "select#date_range, select[name='date_range']"
 
 
 def _previous_month_label() -> str:
-    from datetime import date as _date, timedelta
-
-    first = _date.today().replace(day=1)
-    prev = (first - timedelta(days=1)).replace(day=1)
-    return prev.strftime("%Y-%m")
+    return common.previous_month_label()
 
 
 def select_previous_month(page: Page) -> bool:
@@ -456,13 +369,7 @@ def export_all(page: Page) -> pd.DataFrame | None:
 
 # ── Detecção de moeda ───────────────────────────────────────────────────────────
 def _detect_currency(val) -> str | None:
-    if val is None:
-        return None
-    s = str(val).strip()
-    for prefix, code in CURRENCY_PREFIXES:
-        if prefix in s:
-            return code
-    return None
+    return common.detect_currency(val)
 
 
 def detect_currency_from_df(df: pd.DataFrame) -> str | None:
@@ -501,50 +408,26 @@ def standardize(df: pd.DataFrame, acc: Account, currency: str | None) -> pd.Data
 
 
 def _safe_name(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", name).strip("_") or "report"
+    return common.safe_name(name)
 
 
 def _upsert_csv(path: Path, new_df: pd.DataFrame, key_cols: list[str]) -> pd.DataFrame:
-    """Substitui no CSV existente as linhas cujas key_cols coincidem; appenda o resto."""
-    if path.exists():
-        try:
-            existing = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
-            missing = [c for c in key_cols if c not in existing.columns]
-            if missing:
-                log.warning(
-                    f"Upsert: colunas chave ausentes em {path.name}: {missing} — a sobrescrever"
-                )
-                return new_df.copy()
-            mask = existing[key_cols].apply(tuple, axis=1).isin(
-                new_df[key_cols].astype(str).apply(tuple, axis=1)
-            )
-            return pd.concat([existing[~mask], new_df], ignore_index=True)
-        except Exception as e:
-            log.warning(f"Upsert falhou ({e}) — a sobrescrever {path.name}")
-    return new_df.copy()
+    return common.upsert_csv(path, new_df, key_cols, log=log)
 
 
 def save_operator_csv(df: pd.DataFrame, acc: Account) -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     path = DATA_DIR / f"{_safe_name(acc.file_name)}.csv"
-    merged = _upsert_csv(path, df.astype(str), ["month"])
+    merged = _upsert_csv(path, df.astype(str), ["operador", "username", "month"])
     merged.to_csv(path, index=False, encoding="utf-8-sig")
     log.info(f"Guardado {len(df)} linha(s) → {path.name}")
     return path
 
 
 def save_combined(frames: list[pd.DataFrame]) -> Path | None:
-    if not frames:
-        log.warning("Nenhum dado para consolidar — report/raventrack.csv não gerado")
-        return None
-    new_data = pd.concat(frames, ignore_index=True).astype(str)
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    path = REPORT_DIR / "raventrack.csv"
-    # Substitui todo o período do par operador+username (regra de merge acordada).
-    merged = _upsert_csv(path, new_data, ["operador", "username", "month"])
-    merged.to_csv(path, index=False, encoding="utf-8-sig")
-    log.info(f"Ficheiro consolidado: {path}  ({len(merged)} linhas)")
-    return path
+    return common.save_combined(
+        frames, REPORT_DIR / "raventrack.csv", ["operador", "username", "month"], log, as_str=True
+    )
 
 
 # ── Extracção do relatório ─────────────────────────────────────────────────────
@@ -614,6 +497,10 @@ def main() -> None:
     )
     parser.add_argument("--operador", help="Processa apenas este operador (ex: Novibet)")
     parser.add_argument(
+        "--id", nargs="+", dest="ids",
+        help="Processa apenas a(s) conta(s) pela coluna Id do logins.xlsx",
+    )
+    parser.add_argument(
         "--headful", action="store_true", help="Mostra o browser (ignora HEADLESS=true)"
     )
     args = parser.parse_args()
@@ -623,24 +510,15 @@ def main() -> None:
     log.info("=" * 60)
     log.info(f"Início — {datetime.now():%Y-%m-%d %H:%M:%S}")
 
-    accounts = load_accounts(operador_filter=args.operador)
+    accounts = load_accounts(operador_filter=args.operador, ids=args.ids)
     if not accounts:
         log.warning("Nenhum operador RavenTrack activo encontrado — a terminar")
         sys.exit(0)
     log.info(f"{len(accounts)} operador(es) a processar")
 
-    erros: list[str] = []
-    sem_dados: list[str] = []
-    frames: list[pd.DataFrame] = []
-    for i, acc in enumerate(accounts, 1):
-        log.info(f"[{i}/{len(accounts)}] {acc.operador} / {acc.username}")
-        df = process_account(acc, headless=headless)
-        if df is None:
-            erros.append(f"{acc.operador}/{acc.username}")
-        elif df.empty:
-            sem_dados.append(f"{acc.operador}/{acc.username}")
-        else:
-            frames.append(df)
+    frames, sem_dados, erros = common.run_accounts(
+        accounts, lambda acc: process_account(acc, headless=headless), log
+    )
 
     save_combined(frames)
 

@@ -26,8 +26,15 @@ logs/
 # JSON files
 *.json
 
-# Jupyter Notebook files
+# Credenciais Google — nunca comitar
+config/gcp_service_account.json
+config/*service*account*.json
+config/oauth_client.json
+config/authorized_user.json
+
+# Jupyter Notebook files (mas mantém os versionados em notebooks/)
 *.ipynb
+!notebooks/*.ipynb
 
 # Report files
 report/
