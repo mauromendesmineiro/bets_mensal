@@ -1,11 +1,13 @@
 [project]
 name = "bets-mensal"
 version = "0.1.0"
-description = "Extração mensal dos ganhos de operadores Netrefer (Monthly Earnings Report)"
+description = "Extração mensal dos ganhos de operadores de afiliados (Netrefer, Income Access, Cellxpert, RavenTrack)"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "dotenv>=0.9.9",
+    "google-auth>=2.30.0",
+    "gspread>=6.0.0",
     "html5lib>=1.1",
     "httpx>=0.28.1",
     "lxml>=6.1.1",
@@ -14,4 +16,27 @@ dependencies = [
     "playwright>=1.60.0",
     "python-dotenv>=1.2.2",
     "requests>=2.34.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.17",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# E/F (pyflakes+pycodestyle), I (isort), UP (pyupgrade), B (bugbear).
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "E501",   # comprimento de linha gerido pelo formatter
+    "B905",   # zip() sem strict= : os zips do projecto assumem mesmo tamanho de propósito
+    "B904",   # raise sem 'from' dentro de except : aceitável nas mensagens de config
 ]

@@ -37,9 +37,16 @@ from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
-REPORT_DIR = ROOT / "report"
+try:  # funciona tanto em execução directa quanto importado como scripts.*
+    import common
+except ImportError:
+    from scripts import common
+
+ROOT = common.ROOT
+REPORT_DIR = common.REPORT_DIR
 RATES_CSV = ROOT / "data" / "currency_rates.csv"
+
+log = common.get_logger("build_union")
 
 COMMON_COLS = ["plataforma", "operador", "empresa", "username", "month", "currency"]
 # vendor_name é usado apenas internamente (join com o ref para Novibet/Afiliagambling)
@@ -56,10 +63,8 @@ OUTPUT_COLS = ["index"] + COMMON_COLS + [
 
 REF_XLSX = ROOT / "config" / "ref.xlsx"
 
-# Aliases de operador corrigidos no login (chave normalizada em minúsculas -> nome
-# correcto). Ex.: 'Sportium' foi renomeado para 'SportiumBet'. Depois de os scrapers
-# correrem de novo com o nome corrigido, estes aliases tornam-se inócuos.
-OPERADOR_ALIASES = {"sportium": "SportiumBet"}
+# Aliases de operador centralizados no common (ver common.OPERADOR_ALIASES).
+OPERADOR_ALIASES = common.OPERADOR_ALIASES
 
 
 def parse_amount(val) -> float:
@@ -82,7 +87,7 @@ def parse_amount(val) -> float:
 def _read(name: str) -> pd.DataFrame | None:
     path = REPORT_DIR / name
     if not path.exists():
-        print(f"  aviso: {name} não encontrado — ignorado")
+        log.warning(f"{name} não encontrado — ignorado")
         return None
     return pd.read_csv(path, dtype=str, encoding="utf-8-sig")
 
@@ -237,27 +242,7 @@ def _upsert_csv(
     key_cols: list[str],
     replace_keys: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Substitui no CSV existente as linhas cujas key_cols coincidem; mantém o resto.
-
-    replace_keys: conjunto de chaves a purgar do histórico (por omissão, as do new_df).
-    Útil quando o lote processou chaves que depois foram removidas (inactivas), para
-    que essas também saiam do histórico.
-    """
-    keys_src = replace_keys if replace_keys is not None else new_df
-    if path.exists():
-        try:
-            existing = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
-            missing = [c for c in key_cols if c not in existing.columns]
-            if missing:
-                print(f"  aviso: colunas chave ausentes em {path.name}: {missing} — a sobrescrever")
-                return new_df.copy()
-            mask = existing[key_cols].astype(str).apply(tuple, axis=1).isin(
-                keys_src[key_cols].astype(str).apply(tuple, axis=1)
-            )
-            return pd.concat([existing[~mask], new_df], ignore_index=True)
-        except Exception as e:
-            print(f"  aviso: upsert falhou ({e}) — a sobrescrever {path.name}")
-    return new_df.copy()
+    return common.upsert_csv(path, new_df, key_cols, replace_keys=replace_keys, log=log)
 
 
 def _load_rates() -> dict[tuple[str, str], float]:
@@ -267,7 +252,7 @@ def _load_rates() -> dict[tuple[str, str], float]:
     (menor time_last_update_utc), por ser a mais próxima do fecho do período.
     """
     if not RATES_CSV.exists():
-        print(f"  aviso: {RATES_CSV.name} não encontrado — rs_eur/cpa_eur ficam vazios")
+        log.warning(f"{RATES_CSV.name} não encontrado — rs_eur/cpa_eur ficam vazios")
         return {}
     df = pd.read_csv(RATES_CSV, dtype=str)
     # Ordena pela data/hora da cotação (ascendente) e fica com a mais antiga por chave.
@@ -300,7 +285,7 @@ def enrich_ref(union: pd.DataFrame) -> pd.DataFrame:
     """
     union = union.copy()
     if not REF_XLSX.exists():
-        print(f"  aviso: {REF_XLSX.name} não encontrado — ref/resta ficam vazios")
+        log.warning(f"{REF_XLSX.name} não encontrado — ref/resta ficam vazios")
         union["ref"] = ""
         union["resta"] = ""
         return union
@@ -328,12 +313,12 @@ def enrich_ref(union: pd.DataFrame) -> pd.DataFrame:
     merged = union.merge(ref, on=["_jk", "_un", "_em"], how="left")
     sem_ref = merged["ref"].isna().sum()
     if sem_ref:
-        print(f"  aviso: {sem_ref} linha(s) sem correspondência em ref.xlsx")
+        log.warning(f"{sem_ref} linha(s) sem correspondência em ref.xlsx")
     return merged.drop(columns=["_jk", "_un", "_em"])
 
 
 def main() -> None:
-    print("A construir report/union_data.csv ...")
+    log.info("A construir report/union_data.csv ...")
     frames = [
         from_netrefer(),
         from_raventrack(),
@@ -343,9 +328,7 @@ def main() -> None:
     union = pd.concat(frames, ignore_index=True)
 
     # Corrige nomes de operador renomeados no login (ex.: Sportium -> SportiumBet).
-    union["operador"] = union["operador"].map(
-        lambda o: OPERADOR_ALIASES.get(str(o).strip().lower(), o)
-    )
+    union["operador"] = union["operador"].map(common.canonical_operador)
 
     union["rs_operador"] = union["rs_operador"].round(2)
     union["cpa_operador"] = union["cpa_operador"].round(2)
@@ -379,7 +362,7 @@ def main() -> None:
     union["rs_eur"] = rs_eur
     union["cpa_eur"] = cpa_eur
     if sem_taxa:
-        print(f"  aviso: sem taxa de câmbio para {sorted(sem_taxa)} — rs_eur/cpa_eur vazios nessas linhas")
+        log.warning(f"sem taxa de câmbio para {sorted(sem_taxa)} — rs_eur/cpa_eur vazios nessas linhas")
 
     # Empresa Brasil reportada em EUR: os valores '_operador' devem ficar em BRL
     # (= valor EUR * taxa BRL do mês), mantendo '_eur' em EUR e currency = BRL.
@@ -398,7 +381,7 @@ def main() -> None:
         union.at[idx, "currency"] = "BRL"
         convertidas += 1
     if convertidas:
-        print(f"  {convertidas} linha(s) Brasil/EUR convertidas: _operador em BRL, _eur em EUR")
+        log.info(f"{convertidas} linha(s) Brasil/EUR convertidas: _operador em BRL, _eur em EUR")
 
     # Taxa de câmbio do mês para a moeda final de cada linha (base EUR: 1 EUR = rate).
     union["rate"] = [
@@ -417,11 +400,17 @@ def main() -> None:
     # são contas inactivas ou agregados (ex.: a conta-pai TipsterpageAR, cujos dados
     # válidos são apenas as sub-contas PBA_/CABA_) e são removidas.
     sem_ref = union["ref"].isna()
+    removidas = union[sem_ref][["plataforma", "operador", "username", "empresa"]]
+    # Relatório de divergências de cadastro: reescrito SEMPRE (vazio quando não há
+    # divergência), para não persistir um falso-positivo de uma execução anterior.
+    div_path = REPORT_DIR / "divergencias_cadastro.csv"
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    removidas.to_csv(div_path, index=False, encoding="utf-8-sig")
     if sem_ref.any():
-        removidas = union[sem_ref][["plataforma", "operador", "username", "empresa"]]
-        print(f"  {int(sem_ref.sum())} linha(s) removidas (sem ref / inactivas):")
+        log.info(f"{int(sem_ref.sum())} linha(s) removidas (sem ref / inactivas):")
         for _, r in removidas.iterrows():
-            print(f"    - {r['plataforma']} | {r['operador']} | {r['username']} | {r['empresa']}")
+            log.info(f"    - {r['plataforma']} | {r['operador']} | {r['username']} | {r['empresa']}")
+        log.info(f"Divergências de cadastro: {div_path}")
         union = union[~sem_ref].reset_index(drop=True)
 
     # 'resta' vazio no ref.xlsx assume o valor 'No'.
@@ -470,8 +459,8 @@ def main() -> None:
         out_path, union.astype(str), FINAL_KEYS, replace_keys=processed_keys.astype(str)
     )
     merged.to_csv(out_path, index=False, encoding="utf-8-sig")
-    print(f"OK -> {out_path}  ({len(union)} novas, {len(merged)} no total)")
-    print(merged.groupby(["Plataforma", "AnoMes"]).size().to_string())
+    log.info(f"OK -> {out_path}  ({len(union)} novas, {len(merged)} no total)")
+    log.info("Linhas por plataforma/mês:\n" + merged.groupby(["Plataforma", "AnoMes"]).size().to_string())
 
 
 if __name__ == "__main__":

@@ -33,49 +33,30 @@ from __future__ import annotations
 
 import argparse
 import base64
-import logging
 import os
-import re
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from urllib.parse import urlparse
 
 import httpx
 import pandas as pd
 from playwright.sync_api import BrowserContext, Page, sync_playwright
 
+try:  # funciona tanto em execução directa quanto importado como scripts.*
+    import common
+except ImportError:
+    from scripts import common
+
+common.load_env()
+
 # ── Caminhos do projecto ────────────────────────────────────────────────────
-ROOT = Path(__file__).resolve().parents[1]
-CONFIG_XLSX = ROOT / "config" / "logins.xlsx"
-DATA_DIR = ROOT / "data"
-REPORT_DIR = ROOT / "report"
-LOGS_DIR = ROOT / "logs"
-
-
-def _load_env() -> None:
-    """
-    Carrega o .env suportando chaves entre aspas ("KEY"="VALUE"),
-    que o python-dotenv padrão não strip nas chaves.
-    """
-    env_file = ROOT / ".env"
-    if not env_file.exists():
-        return
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        k = k.strip().strip('"')
-        v = v.strip().strip('"')
-        if k and k not in os.environ:
-            os.environ[k] = v
-
-
-_load_env()
+ROOT = common.ROOT
+CONFIG_XLSX = common.CONFIG_XLSX
+DATA_DIR = common.DATA_DIR
+REPORT_DIR = common.REPORT_DIR
 
 # ── Constantes da plataforma ────────────────────────────────────────────────
 PLATFORM_SLUG = "INCOME_ACCESS"
@@ -86,57 +67,19 @@ CAPTCHA_FLAGS = {"4", "5"}
 # O URL do iframe é o mesmo path sem o prefixo /portal/#
 REPORT_PATH = "/reporting/earnings_report.asp"
 
-DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "20000"))
-SLOW_MO = int(os.getenv("SLOW_MO", "0"))
-HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
-TWOCAPTCHA_API_KEY = os.getenv("TWOCAPTCHA_API_KEY", "").strip()
-# Tempo máximo à espera que o report (kendo-grid) termine de gerar — reports
-# grandes (ex: Betano) podem demorar minutos. Poll-based: avança assim que pronto.
-REPORT_READY_TIMEOUT = int(os.getenv("REPORT_READY_TIMEOUT", "300000"))
+DEFAULT_TIMEOUT = common.DEFAULT_TIMEOUT
+SLOW_MO = common.SLOW_MO
+HEADLESS = common.HEADLESS
+REPORT_READY_TIMEOUT = common.REPORT_READY_TIMEOUT
+TWOCAPTCHA_API_KEY = os.getenv("TWOCAPTCHA_API_KEY", "").strip()  # específico desta plataforma
 
 
-# ── Logger ──────────────────────────────────────────────────────────────────
-def get_logger(name: str = "scp_income_access") -> logging.Logger:
-    logger = logging.getLogger(name)
-    if logger.handlers:
-        return logger
-    logger.setLevel(logging.DEBUG)
-    fmt = logging.Formatter(
-        "%(asctime)s [%(levelname)-7s] %(message)s", datefmt="%H:%M:%S"
-    )
-    if hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setLevel(logging.INFO)
-    sh.setFormatter(fmt)
-    logger.addHandler(sh)
-    try:
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)
-        plat = name.replace("scp_", "")
-        fh = logging.FileHandler(
-            LOGS_DIR / f"{datetime.now():%Y-%m-%d}_{plat}.log", encoding="utf-8"
-        )
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-    except Exception:
-        pass
-    return logger
-
-
-log = get_logger()
+log = common.get_logger("scp_income_access")
 
 
 # ── Config / contas ───────────────────────────────────────────────────────────
-def sanitize(val: str) -> str:
-    return re.sub(r"[^A-Z0-9]", "_", str(val).upper())
-
-
 def env_key_for(operador: str, username: str) -> str:
-    return f"PASS_{PLATFORM_SLUG}_{sanitize(operador)}_{sanitize(username)}"
+    return common.env_key_for(PLATFORM_SLUG, operador, username)
 
 
 @dataclass
@@ -147,6 +90,7 @@ class Account:
     login_url: str
     file_name: str
     has_captcha: bool
+    id: str = ""
 
     @property
     def password(self) -> str:
@@ -154,11 +98,12 @@ class Account:
 
     @property
     def base_url(self) -> str:
-        p = urlparse(self.login_url)
-        return f"{p.scheme}://{p.netloc}"
+        return common.base_url_of(self.login_url)
 
 
-def load_accounts(operador_filter: str | None = None) -> list[Account]:
+def load_accounts(
+    operador_filter: str | None = None, ids: list[str] | None = None
+) -> list[Account]:
     if not CONFIG_XLSX.exists():
         log.error(f"Ficheiro de config não encontrado: {CONFIG_XLSX}")
         return []
@@ -168,6 +113,9 @@ def load_accounts(operador_filter: str | None = None) -> list[Account]:
         (df["Plataforma"].str.strip().str.lower() == "incomeaccess")
         & (df["Active"].str.strip().isin(ACTIVE_FLAGS))
     ].reset_index(drop=True)
+    if ids:
+        wanted = {str(i).strip() for i in ids}
+        df = df[df["Id"].astype(str).str.strip().isin(wanted)].reset_index(drop=True)
 
     accounts: list[Account] = []
     for _, row in df.iterrows():
@@ -185,6 +133,7 @@ def load_accounts(operador_filter: str | None = None) -> list[Account]:
         active_flag = str(row.get("Active", "1")).strip()
         accounts.append(
             Account(
+                id=str(row.get("Id", "")).strip(),
                 operador=operador,
                 empresa=str(row.get("Empresa", "")).strip(),
                 username=username,
@@ -749,6 +698,14 @@ def standardize(df: pd.DataFrame, acc: Account) -> pd.DataFrame:
     _prev = (_today - __import__("datetime").timedelta(days=1)).replace(day=1)
     month_label = _prev.strftime("%Y-%m")
 
+    # O export do Income Access traz duas tabelas: o detalhe (RowID=1) e uma
+    # tabela-resumo/agregada (RowID=2) que soma o detalhe. A agregada duplicaria
+    # os valores e, em contas com breakdown por merchant, gera um username puro
+    # (ex.: 'TipsterpageAR') que não casa no ref — falso-positivo. Mantém-se só o
+    # detalhe (RowID=1); nenhuma conta existe apenas com RowID=2.
+    if "rowid" in df.columns:
+        df = df[df["rowid"].astype(str).str.strip() == "1"].reset_index(drop=True)
+
     # Se o report tiver coluna "merchant" com valores, combina com o username
     # ex: merchant="Betano AR CABA", username="TipsterpageAR" → "CABA_TipsterpageAR"
     if "merchant" in df.columns and df["merchant"].notna().any():
@@ -775,29 +732,11 @@ def standardize(df: pd.DataFrame, acc: Account) -> pd.DataFrame:
 
 
 def _safe_name(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", name).strip("_") or "report"
+    return common.safe_name(name)
 
 
 def _upsert_csv(path: Path, new_df: pd.DataFrame, key_cols: list[str]) -> pd.DataFrame:
-    """Substitui no CSV existente as linhas cujas key_cols coincidem com new_df; appenda o resto."""
-    if path.exists():
-        try:
-            existing = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
-            missing = [c for c in key_cols if c not in existing.columns]
-            if missing:
-                log.warning(f"Upsert: colunas chave ausentes no ficheiro existente: {missing} — a sobrescrever")
-                return new_df.copy()
-            mask = existing[key_cols].apply(tuple, axis=1).isin(
-                new_df[key_cols].apply(tuple, axis=1)
-            )
-            removed = mask.sum()
-            existing = existing[~mask]
-            if removed:
-                log.debug(f"Upsert: {removed} linha(s) substituída(s) em {path.name}")
-            return pd.concat([existing, new_df], ignore_index=True)
-        except Exception as e:
-            log.warning(f"Upsert falhou ({e}) — a sobrescrever {path.name}")
-    return new_df.copy()
+    return common.upsert_csv(path, new_df, key_cols, log=log)
 
 
 def save_operator_csv(df: pd.DataFrame, acc: Account) -> Path:
@@ -810,16 +749,9 @@ def save_operator_csv(df: pd.DataFrame, acc: Account) -> Path:
 
 
 def save_combined(frames: list[pd.DataFrame]) -> Path | None:
-    if not frames:
-        log.warning("Nenhum dado para consolidar — data/income_access.csv não gerado")
-        return None
-    new_data = pd.concat(frames, ignore_index=True)
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    path = REPORT_DIR / "income_access.csv"
-    merged = _upsert_csv(path, new_data, ["operador", "account_username", "month"])
-    merged.to_csv(path, index=False, encoding="utf-8-sig")
-    log.info(f"Ficheiro consolidado: {path}  ({len(merged)} linhas)")
-    return path
+    return common.save_combined(
+        frames, REPORT_DIR / "income_access.csv", ["operador", "account_username", "month"], log
+    )
 
 
 # ── Orquestrador ──────────────────────────────────────────────────────────────
@@ -865,6 +797,10 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--operador", help="Processa apenas este operador (ex: Betano)")
+    parser.add_argument(
+        "--id", nargs="+", dest="ids",
+        help="Processa apenas a(s) conta(s) pela coluna Id do logins.xlsx",
+    )
     parser.add_argument("--headful", action="store_true", help="Mostra o browser")
     args = parser.parse_args()
 
@@ -873,7 +809,7 @@ def main() -> None:
     log.info("=" * 60)
     log.info(f"Inicio -- {datetime.now():%Y-%m-%d %H:%M:%S}")
 
-    accounts = load_accounts(operador_filter=args.operador)
+    accounts = load_accounts(operador_filter=args.operador, ids=args.ids)
     if not accounts:
         log.warning("Nenhum operador activo encontrado -- a terminar")
         sys.exit(0)
@@ -888,7 +824,14 @@ def main() -> None:
     erros: list[str] = []
     for i, acc in enumerate(accounts, 1):
         log.info(f"[{i}/{len(accounts)}] {acc.operador} / {acc.username}")
-        df = process_account(acc, headless=headless)
+        df = common.retry_until(
+            lambda acc=acc: process_account(acc, headless=headless),
+            ok=lambda r: r is not None,
+            attempts=common.RETRY_ATTEMPTS,
+            backoff_s=common.RETRY_BACKOFF_S,
+            log=log,
+            label=f"{acc.operador}/{acc.username}",
+        )
         if df is not None and not df.empty:
             frames.append(df)
         else:
