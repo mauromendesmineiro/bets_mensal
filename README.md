@@ -18,6 +18,7 @@ de cada plataforma as contas são processadas sequencialmente.
 3. gsheets.py      → puxa o 'ref' do Google Sheets      (config/ref.xlsx, --pull-ref)
                      + valida contas vs logins.xlsx     (config/contas_faltantes.csv)
 4. build_union.py  → consolida tudo                     (report/union_data.csv)
+5. gsheets.py      → escreve union_data no Sheets       (DatosAutomatizados, append)
 ```
 
 ## Estrutura
@@ -76,6 +77,25 @@ Cada scraper filtra automaticamente pela coluna `Plataforma`
 | **Income Access** | Login com resolução de captcha via **2captcha** (retry automático). Período = mês anterior, Merchant = *All Merchants*. Exporta CSV UTF-8 do kendo-grid (até 5 min). `pct_commission`/`cpa_commission`. |
 | **Cellxpert** | SPA Angular servida sob vários domínios white-label (evoaffiliates, blaze.partners, …); já em inglês. Agrega `amount` por `commission_type` (`CPA*` / `Revshare*`). |
 | **RavenTrack** | Plataforma Raven5, breakdown por **vendor** (uma linha por `Vendor Name`). Usa o "Export All" para garantir todas as linhas, mas lê a moeda da tabela renderizada. `RevShare Commission`/`CPA Commission`. |
+
+## Escrita no Google Sheets (`DatosAutomatizados`)
+
+Após consolidar o `union_data.csv`, o pipeline **escreve automaticamente** na aba
+`DatosAutomatizados` da planilha do Google:
+
+- **Modo:** append (adiciona ao final, não substitui)
+- **Decimais:** convertidos para vírgula (ex: `379.71` → `379,71`)
+- **Tipos:** números e datas são interpretados corretamente (não como texto)
+- **Frequência:** automática a cada execução do `main.py`
+- **Flags:**
+  - `--no-append` para pular essa etapa
+  - `--append-union` para rodar isoladamente
+
+**Alterações manuais:** é possível preencher campos específicos com textos (ex:
+`RS_Operador = "Esperar cambio"`) no CSV antes do append; a escrita sobrescreve
+a linha inteira.
+
+---
 
 ## O dataset unificado (`union_data.csv`)
 
@@ -163,7 +183,7 @@ navegador na 1ª execução com `--pull-ref`.
 ### Pipeline completo
 
 ```bash
-uv run python main.py                          # câmbio → 4 scrapers → ref → union
+uv run python main.py                          # pipeline completo
 uv run python main.py --only cellxpert raventrack
 uv run python main.py --operador Novibet       # filtra o operador nos scrapers
 uv run python main.py --id 12 34               # filtra por Id de conta do logins.xlsx
@@ -173,9 +193,10 @@ uv run python main.py --max-workers 4          # nº máx. de plataformas em par
 uv run python main.py --no-currency            # salta a etapa de câmbio
 uv run python main.py --no-ref                 # salta a actualização via Google Sheets
 uv run python main.py --no-union               # salta a consolidação final
+uv run python main.py --no-append              # salta a escrita no Google Sheets
 ```
 
-Cada execução acrescenta uma linha por etapa em `report/run_summary.csv` (estado e duração).
+Cada execução acrescenta uma linha por etapa em `report/run_summary.csv` (estado e duração em hh:mm:ss).
 
 ### Scrapers individuais
 
@@ -194,7 +215,8 @@ Todos os scrapers aceitam `--operador`, `--id` e `--headful`.
 uv run python scripts/currency.py                       # actualiza câmbio
 uv run python scripts/gsheets.py --pull-ref             # planilha → config/ref.xlsx (merge 'resta')
 uv run python scripts/gsheets.py --validate-logins      # planilha → config/contas_faltantes.csv
-uv run python scripts/gsheets.py --push-union           # union_data.csv → planilha
+uv run python scripts/gsheets.py --push-union           # union_data.csv → planilha (substitui tudo)
+uv run python scripts/gsheets.py --append-union         # union_data.csv → DatosAutomatizados (append, decimais em vírgula)
 uv run python scripts/build_union.py                    # consolida report/*.csv
 ```
 
