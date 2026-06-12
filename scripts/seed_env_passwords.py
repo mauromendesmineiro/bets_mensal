@@ -29,6 +29,8 @@ CONFIG_XLSX = ROOT / "config" / "logins.xlsx"
 PLATFORM_SLUG_MAP = {
     "netrefer": "NETREFER",
     "incomeaccess": "INCOME_ACCESS",
+    "cellxpert": "CELLXPERT",
+    "raventrack": "RAVENTRACK",
 }
 
 
@@ -67,6 +69,17 @@ def main() -> None:
     Path(args.output).write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"[OK] {len(seen)} passwords escritas em {args.output}")
     print("  Acrescenta o conteúdo ao teu .env e nunca o committes.")
+
+    # Higiene: a coluna Password do xlsx é apenas fonte desta migração. Se ainda
+    # tiver senhas, recomenda-se limpá-la (o scraper lê SEMPRE do .env).
+    com_senha = df["Password"].notna() & (df["Password"].astype(str).str.strip() != "") \
+        if "Password" in df.columns else None
+    if com_senha is not None and int(com_senha.sum()) > 0:
+        print(
+            f"  AVISO: a coluna 'Password' do logins.xlsx ainda tem "
+            f"{int(com_senha.sum())} valor(es). Após migrar para o .env, "
+            f"considera limpá-la (senhas em claro no Excel)."
+        )
 
 
 if __name__ == "__main__":
