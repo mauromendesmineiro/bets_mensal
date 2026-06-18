@@ -33,8 +33,9 @@ config/oauth_client.json
 config/authorized_user.json
 
 # Jupyter Notebook files (mas mantém os versionados em notebooks/)
-*.ipynb
-!notebooks/*.ipynb
+notebooks/
 
 # Report files
 report/
+
+plataformas_adhoc.py
