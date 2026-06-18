@@ -205,7 +205,10 @@ def main() -> None:
     if args.no_union:
         print("[union] saltado (--no-union)")
     else:
-        resultados.append(run_step("union", UNION_SCRIPT, timeout=args.timeout))
+        union_extra = []
+        if args.ids:
+            union_extra += ["--id", *args.ids]
+        resultados.append(run_step("union", UNION_SCRIPT, union_extra, timeout=args.timeout))
 
     # ── 5) Escrita no Google Sheets ─────────────────────────────────────────
     print("-" * 60)

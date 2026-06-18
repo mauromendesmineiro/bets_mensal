@@ -330,16 +330,54 @@ def _convert_to_comma_decimal(value: str) -> str:
     return s
 
 
-def append_union_to_sheet(csv_path: Path = UNION_CSV) -> None:
+def _filter_by_ids(df: pd.DataFrame, ids: list[str]) -> pd.DataFrame:
+    """Filtra o union_data pelas linhas que correspondem aos IDs do logins.xlsx.
+
+    Faz lookup (Id -> Operador + Username) no logins.xlsx e filtra o union_data
+    pelas colunas Operador (case-insensitive) e Login (case-insensitive).
+    """
+    if not LOGINS_XLSX.exists():
+        raise FileNotFoundError(f"{LOGINS_XLSX} não encontrado")
+
+    logins = pd.read_excel(LOGINS_XLSX, dtype=str)
+    wanted = {str(i).strip() for i in ids}
+    rows = logins[logins["Id"].astype(str).str.strip().isin(wanted)]
+
+    if rows.empty:
+        raise ValueError(f"Nenhum ID encontrado no logins.xlsx: {ids}")
+
+    for _, r in rows.iterrows():
+        log.info(
+            f"ID {r['Id']} → {r['Operador']} / {r['Username']} ({r['Plataforma']} / {r['Empresa']})"
+        )
+
+    mask = pd.Series(False, index=df.index)
+    for _, r in rows.iterrows():
+        operador = str(r["Operador"]).strip().lower()
+        username = str(r["Username"]).strip().lower()
+        m_op = df["Operador"].astype(str).str.strip().str.lower() == operador
+        m_lg = df["Login"].astype(str).str.strip().str.lower() == username
+        mask = mask | (m_op & m_lg)
+
+    filtered = df[mask].reset_index(drop=True)
+    log.info(f"{len(filtered)} linha(s) filtrada(s) de {len(df)} para IDs {ids}")
+    return filtered
+
+
+def append_union_to_sheet(csv_path: Path = UNION_CSV, ids: list[str] | None = None) -> None:
     """Escreve union_data.csv na aba DatosAutomatizados (append: adiciona ao final).
 
     Converte valores numéricos para vírgula como separador de decimal.
     Se a aba não existe, cria; se existe, acrescenta após a última linha de dados.
+    Se `ids` for fornecido, envia apenas as linhas dos IDs correspondentes.
     """
     if not csv_path.exists():
         raise FileNotFoundError(f"{csv_path} não encontrado — corra o build_union primeiro")
 
     df = pd.read_csv(csv_path, dtype=str, encoding="utf-8-sig").fillna("")
+
+    if ids:
+        df = _filter_by_ids(df, ids)
     tab = "DatosAutomatizados"
     sh = _open_spreadsheet()
 
@@ -370,6 +408,8 @@ def main() -> None:
     parser.add_argument("--append-union", action="store_true", help="union_data.csv -> planilha aba DatosAutomatizados (append, com decimais em vírgula)")
     parser.add_argument("--validate-logins", action="store_true",
                         help="Planilha vs logins.xlsx -> config/contas_faltantes.csv")
+    parser.add_argument("--id", nargs="+", dest="ids",
+                        help="Filtra o --append-union pelos IDs do logins.xlsx (ex: --id 148 149)")
     args = parser.parse_args()
 
     if not (args.pull_ref or args.push_union or args.append_union or args.validate_logins):
@@ -383,7 +423,7 @@ def main() -> None:
     if args.push_union:
         write_union_to_sheet()
     if args.append_union:
-        append_union_to_sheet()
+        append_union_to_sheet(ids=args.ids or None)
 
 
 if __name__ == "__main__":

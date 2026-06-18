@@ -317,7 +317,34 @@ def enrich_ref(union: pd.DataFrame) -> pd.DataFrame:
     return merged.drop(columns=["_jk", "_un", "_em"])
 
 
+def _accounts_for_ids(ids: list[str]) -> list[tuple[str, str]]:
+    """Devolve lista de (operador_lower, username_lower) para os IDs fornecidos."""
+    logins_path = ROOT / "config" / "logins.xlsx"
+    if not logins_path.exists():
+        raise FileNotFoundError(f"{logins_path} não encontrado")
+    lg = pd.read_excel(logins_path, dtype=str)
+    wanted = {str(i).strip() for i in ids}
+    rows = lg[lg["Id"].astype(str).str.strip().isin(wanted)]
+    if rows.empty:
+        raise ValueError(f"Nenhum ID encontrado no logins.xlsx: {ids}")
+    pairs = []
+    for _, r in rows.iterrows():
+        op = str(r["Operador"]).strip().lower()
+        un = str(r["Username"]).strip().lower()
+        log.info(f"ID {r['Id'].strip()} → {r['Operador']} / {r['Username']} ({r['Plataforma']} / {r['Empresa']})")
+        pairs.append((op, un))
+    return pairs
+
+
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="Constrói report/union_data.csv")
+    parser.add_argument(
+        "--id", nargs="+", dest="ids",
+        help="Processa e grava apenas as contas dos IDs indicados (ex: --id 148 149)",
+    )
+    args = parser.parse_args()
+
     log.info("A construir report/union_data.csv ...")
     frames = [
         from_netrefer(),
@@ -391,6 +418,18 @@ def main() -> None:
 
     # Enriquece com ref/resta do config/ref.xlsx.
     union = enrich_ref(union)
+
+    # Filtro por ID: mantém apenas as contas dos IDs pedidos.
+    if args.ids:
+        pairs = _accounts_for_ids(args.ids)
+        op_col = union["operador"].astype(str).str.strip().str.lower()
+        un_col = union["username"].astype(str).str.strip().str.lower()
+        mask = pd.Series(False, index=union.index)
+        for op, un in pairs:
+            mask |= (op_col == op) & (un_col == un)
+        before = len(union)
+        union = union[mask].reset_index(drop=True)
+        log.info(f"Filtro --id: {len(union)} linha(s) de {before} seleccionadas")
 
     # Chaves de todos os períodos processados (antes de remover), para limpar também
     # do histórico as linhas que agora foram removidas (inactivas/agregadas).
