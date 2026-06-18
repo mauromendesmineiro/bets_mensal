@@ -36,6 +36,7 @@ import base64
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from io import StringIO
@@ -791,6 +792,49 @@ def process_account(acc: Account, headless: bool) -> pd.DataFrame | None:
             browser.close()
 
 
+# Workers padrão: 3 para contas sem captcha, 1 para contas com captcha.
+# O 2captcha tem rate limit e custo por resolução — captcha sempre sequencial.
+_DEFAULT_WORKERS = 3
+_DEFAULT_CAPTCHA_WORKERS = 1
+
+
+def _run_account(acc: Account, headless: bool) -> tuple[Account, pd.DataFrame | None]:
+    df = common.retry_until(
+        lambda acc=acc: process_account(acc, headless=headless),
+        ok=lambda r: r is not None,
+        attempts=common.RETRY_ATTEMPTS,
+        backoff_s=common.RETRY_BACKOFF_S,
+        log=log,
+        label=f"{acc.operador}/{acc.username}",
+    )
+    return acc, df
+
+
+def _run_parallel(
+    accounts: list[Account],
+    headless: bool,
+    max_workers: int,
+) -> tuple[list[pd.DataFrame], list[str]]:
+    frames: list[pd.DataFrame] = []
+    erros: list[str] = []
+    total = len(accounts)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_run_account, acc, headless): acc for acc in accounts}
+        done = 0
+        for future in as_completed(futures):
+            acc, df = future.result()
+            done += 1
+            if df is not None and not df.empty:
+                frames.append(df)
+                log.info(f"[{done}/{total}] OK  {acc.operador}/{acc.username}")
+            else:
+                erros.append(f"{acc.operador}/{acc.username}")
+                log.warning(f"[{done}/{total}] ERR {acc.operador}/{acc.username}")
+
+    return frames, erros
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Extração mensal de comissões Income Access",
@@ -802,6 +846,15 @@ def main() -> None:
         help="Processa apenas a(s) conta(s) pela coluna Id do logins.xlsx",
     )
     parser.add_argument("--headful", action="store_true", help="Mostra o browser")
+    parser.add_argument(
+        "--workers", type=int, default=_DEFAULT_WORKERS,
+        help=f"Nº de contas em paralelo para contas sem captcha (padrão: {_DEFAULT_WORKERS})",
+    )
+    parser.add_argument(
+        "--captcha-workers", type=int, default=_DEFAULT_CAPTCHA_WORKERS,
+        dest="captcha_workers",
+        help=f"Nº de contas em paralelo para contas com captcha (padrão: {_DEFAULT_CAPTCHA_WORKERS})",
+    )
     args = parser.parse_args()
 
     headless = HEADLESS and not args.headful
@@ -814,28 +867,31 @@ def main() -> None:
         log.warning("Nenhum operador activo encontrado -- a terminar")
         sys.exit(0)
 
-    captcha_count = sum(1 for a in accounts if a.has_captcha)
+    no_captcha = [a for a in accounts if not a.has_captcha]
+    with_captcha = [a for a in accounts if a.has_captcha]
+
     log.info(
         f"{len(accounts)} operador(es) a processar "
-        f"({captcha_count} com captcha)"
+        f"({len(with_captcha)} com captcha) — "
+        f"workers: {args.workers} normal / {args.captcha_workers} captcha"
     )
 
     frames: list[pd.DataFrame] = []
     erros: list[str] = []
-    for i, acc in enumerate(accounts, 1):
-        log.info(f"[{i}/{len(accounts)}] {acc.operador} / {acc.username}")
-        df = common.retry_until(
-            lambda acc=acc: process_account(acc, headless=headless),
-            ok=lambda r: r is not None,
-            attempts=common.RETRY_ATTEMPTS,
-            backoff_s=common.RETRY_BACKOFF_S,
-            log=log,
-            label=f"{acc.operador}/{acc.username}",
-        )
-        if df is not None and not df.empty:
-            frames.append(df)
-        else:
-            erros.append(f"{acc.operador}/{acc.username}")
+
+    # Contas sem captcha correm em paralelo
+    if no_captcha:
+        log.info(f"A processar {len(no_captcha)} conta(s) sem captcha (workers={args.workers})...")
+        f, e = _run_parallel(no_captcha, headless, max_workers=args.workers)
+        frames.extend(f)
+        erros.extend(e)
+
+    # Contas com captcha correm em paralelo limitado (padrão=1 = sequencial)
+    if with_captcha:
+        log.info(f"A processar {len(with_captcha)} conta(s) com captcha (workers={args.captcha_workers})...")
+        f, e = _run_parallel(with_captcha, headless, max_workers=args.captcha_workers)
+        frames.extend(f)
+        erros.extend(e)
 
     save_combined(frames)
 
