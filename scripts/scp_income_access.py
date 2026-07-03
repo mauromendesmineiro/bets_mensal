@@ -722,7 +722,7 @@ def standardize(df: pd.DataFrame, acc: Account) -> pd.DataFrame:
     meta = {
         "operador": acc.operador,
         "empresa": acc.empresa,
-        "plataforma": "IncomeAccess",
+        "plataforma": "Income Access",
         "account_username": account_username_val,
         "month": month_label,
         "extracted_at": datetime.now().isoformat(timespec="seconds"),
@@ -773,7 +773,7 @@ def process_account(acc: Account, headless: bool) -> pd.DataFrame | None:
     log.info(f"── IncomeAccess / {acc.operador} / {acc.username}")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless, slow_mo=SLOW_MO)
-        context: BrowserContext = browser.new_context(accept_downloads=True)
+        context: BrowserContext = browser.new_context(accept_downloads=True, ignore_https_errors=True)
         page: Page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:

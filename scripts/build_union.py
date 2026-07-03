@@ -497,6 +497,9 @@ def main() -> None:
     merged = _upsert_csv(
         out_path, union.astype(str), FINAL_KEYS, replace_keys=processed_keys.astype(str)
     )
+    # Mantém apenas o mês alvo no ficheiro final.
+    target_month = common.previous_month_label()
+    merged = merged[merged["AnoMes"] == target_month].reset_index(drop=True)
     merged.to_csv(out_path, index=False, encoding="utf-8-sig")
     log.info(f"OK -> {out_path}  ({len(union)} novas, {len(merged)} no total)")
     log.info("Linhas por plataforma/mês:\n" + merged.groupby(["Plataforma", "AnoMes"]).size().to_string())
