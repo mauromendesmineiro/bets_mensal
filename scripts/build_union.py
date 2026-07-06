@@ -112,6 +112,14 @@ def from_netrefer() -> pd.DataFrame:
     out = _base_frame(df)
     out["rs_operador"] = df["Revenue Share Reward"].map(parse_amount).values
     out["cpa_operador"] = df["CPA Reward"].map(parse_amount).values
+    # 22Bet: ao contrário dos restantes operadores da Netrefer, o CPA correcto
+    # vem de 'Reward Due' (não de 'CPA Reward') e o RS não entra na conta (fica 0).
+    is_22bet = df["operador"].astype(str).str.strip() == "22Bet"
+    if is_22bet.any():
+        out.loc[is_22bet.values, "cpa_operador"] = (
+            df.loc[is_22bet, "Reward Due"].map(parse_amount).values
+        )
+        out.loc[is_22bet.values, "rs_operador"] = 0.0
     return out.reset_index(drop=True)
 
 
@@ -486,6 +494,23 @@ def main() -> None:
         total_facturacion(r, c, s)
         for r, c, s in zip(union["Resta"], union["CPA_EUR"], union["RS_EUR"])
     ]
+
+    # Excepção RavenTrack/affiliabetbrasil@gmail.com: os campos '_Operador' ficam
+    # com o texto "Esperar cambio" (câmbio ainda não disponível); os '_EUR' mantêm
+    # os valores normais.
+    esperar_cambio = (
+        (union["Plataforma"].astype(str).str.strip() == "Raventrack")
+        & (union["Login"].astype(str).str.strip().str.lower() == "affiliabetbrasil@gmail.com")
+    )
+    if esperar_cambio.any():
+        for col in ["RS_Operador", "CPA_Operador", "TotalFacturacion_Operador"]:
+            union[col] = union[col].astype(object)
+            union.loc[esperar_cambio, col] = "Esperar cambio"
+        # ValorMoneda_XE fica vazio enquanto o câmbio não for definido na planilha
+        # (é o gatilho que a fórmula do Sheets usa para saber quando calcular).
+        union["ValorMoneda_XE"] = union["ValorMoneda_XE"].astype(object)
+        union.loc[esperar_cambio, "ValorMoneda_XE"] = ""
+
     processed_keys = processed_keys.rename(
         columns={"plataforma": "Plataforma", "operador": "Operador",
                  "username": "Login", "month": "AnoMes"}

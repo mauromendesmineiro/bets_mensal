@@ -364,12 +364,62 @@ def _filter_by_ids(df: pd.DataFrame, ids: list[str]) -> pd.DataFrame:
     return filtered
 
 
+def _col_letter(idx: int) -> str:
+    """Índice de coluna (0-based) -> letra(s) do Sheets (0->A, 25->Z, 26->AA, ...)."""
+    idx += 1
+    letters = ""
+    while idx:
+        idx, rem = divmod(idx - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+# Pares (_Operador, _EUR) para os quais, quando o valor é "Esperar cambio", se
+# insere uma fórmula em vez do texto fixo: se ValorMoneda_XE estiver vazio
+# mantém "Esperar cambio", senão calcula _Operador = _EUR * ValorMoneda_XE.
+ESPERAR_CAMBIO_PAIRS = [
+    ("RS_Operador", "RS_EUR"),
+    ("CPA_Operador", "CPA_EUR"),
+    ("TotalFacturacion_Operador", "TotalFacturacion_EUR"),
+]
+ESPERAR_CAMBIO_TEXT = "Esperar cambio"
+RATE_COL = "ValorMoneda_XE"
+
+
+def _apply_esperar_cambio_formulas(rows: list[list[str]], cols: list[str], start_row: int) -> None:
+    """Substitui, in-place, o texto 'Esperar cambio' pela fórmula equivalente,
+    usando as posições reais das linhas na planilha (start_row = 1ª linha nova)."""
+    if RATE_COL not in cols:
+        return
+    rate_idx = cols.index(RATE_COL)
+    rate_letter = _col_letter(rate_idx)
+    pairs = [
+        (cols.index(op), cols.index(eur))
+        for op, eur in ESPERAR_CAMBIO_PAIRS
+        if op in cols and eur in cols
+    ]
+    if not pairs:
+        return
+    for i, row in enumerate(rows):
+        row_num = start_row + i
+        for op_idx, eur_idx in pairs:
+            if str(row[op_idx]).strip() == ESPERAR_CAMBIO_TEXT:
+                eur_letter = _col_letter(eur_idx)
+                row[op_idx] = (
+                    f'=IF({rate_letter}{row_num}="";"{ESPERAR_CAMBIO_TEXT}";'
+                    f"{eur_letter}{row_num}*{rate_letter}{row_num})"
+                )
+
+
 def append_union_to_sheet(csv_path: Path = UNION_CSV, ids: list[str] | None = None) -> None:
     """Escreve union_data.csv na aba DatosAutomatizados (append: adiciona ao final).
 
     Converte valores numéricos para vírgula como separador de decimal.
     Se a aba não existe, cria; se existe, acrescenta após a última linha de dados.
     Se `ids` for fornecido, envia apenas as linhas dos IDs correspondentes.
+    Linhas com "Esperar cambio" nos campos '_Operador' recebem uma fórmula
+    (em vez do texto fixo) que calcula o valor assim que ValorMoneda_XE deixar
+    de estar vazio na planilha.
     """
     if not csv_path.exists():
         raise FileNotFoundError(f"{csv_path} não encontrado — corra o build_union primeiro")
@@ -389,12 +439,17 @@ def append_union_to_sheet(csv_path: Path = UNION_CSV, ids: list[str] | None = No
         ws.append_row(df.columns.tolist(), value_input_option="USER_ENTERED")
         log.debug(f"Aba '{tab}' criada com cabeçalho")
 
+    # Nº de linhas já existentes (incl. cabeçalho) -> onde as novas linhas vão cair.
+    existing_rows = len(ws.get_all_values())
+    start_row = existing_rows + 1
+
     # Converte decimais em todos os valores
     df_converted = df.map(lambda x: _convert_to_comma_decimal(x))
 
     # Append em bloco: envia todas as linhas de uma vez (economiza quota do Sheets)
-    # USER_ENTERED permite que o Sheets interprete números, datas, etc. corretamente
+    # USER_ENTERED permite que o Sheets interprete números, datas, fórmulas, etc.
     rows_to_append = df_converted.values.tolist()
+    _apply_esperar_cambio_formulas(rows_to_append, df_converted.columns.tolist(), start_row)
     ws.append_rows(rows_to_append, value_input_option="USER_ENTERED")
 
     log.info(f"OK -> aba '{tab}' actualizada (append: {len(df)} linhas adicionadas)")
